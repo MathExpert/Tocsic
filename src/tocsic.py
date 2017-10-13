@@ -3,13 +3,21 @@
 import re
 import os
 import argparse
+from enum import Enum
+from tocsic_utils import static_vars
 
 
 class Tocsic:
     toc_marker = '# Table of Contents'
 
     head_regex = re.compile(r'(#+)\s*(\S+(?:\s+\S+)*)')
-    keyword_regex = re.compile(r'\s*<!-- ?keyword:\s*(\w+).*')
+    keyword_regex = re.compile(r'\s*<a +id="([\w-]+)"></a>')
+
+    class BodyState(Enum):
+        BODY = 1
+        FOUND_LINK = 2
+        FOUND_HEADER = 3
+        IN_CODE_BLOCK = 4
 
     def __init__(self):
         self.args = None
@@ -24,6 +32,8 @@ class Tocsic:
         self.toc_info = []
         self.toc = Tocsic.toc_marker + '\n'
         self.body = ''
+
+        self.header_dict = dict()
 
         try:
             self.file = open(self.input_file, 'r')
@@ -100,7 +110,6 @@ class Tocsic:
         try:
             line = next(line_gen).strip()
             while line:
-                print(line)
                 line = next(line_gen).strip()
 
             line_gen.back()
@@ -108,19 +117,58 @@ class Tocsic:
             pass
 
     def process_body(self, line_gen):
-        line = ''
+        body_state = Tocsic.BodyState.BODY
+        link_line = ''
 
         try:
             while True:
-                line, prev_line = next(line_gen), line
-                self.body += line
-                # TODO: make sure we are not in a block of code
-                # TODO: add support for === and --- style headers
-                if line.startswith('#'):
-                    self.make_toc_entry(line, line_gen.line_num, prev_line)
-                    pass
+                if body_state == Tocsic.BodyState.BODY:
+                    line = next(line_gen)
+                    if line.startswith('<a'):
+                        link_line = line
+                        body_state = Tocsic.BodyState.FOUND_LINK
+                    elif line.startswith('#'):
+                        # TODO: add support for === and --- style headers
+                        self.make_toc_entry(line, line_gen.line_num, None)
+                        self.body += '<a id="{}"></a>\n'.format(self.toc_info[-1][2])
+                        self.body += line
+                    elif line.startswith('```'):
+                        body_state = Tocsic.BodyState.IN_CODE_BLOCK
+                        self.body += line
+                    else:
+                        self.body += line
+                elif body_state == Tocsic.BodyState.IN_CODE_BLOCK:
+                    line = next(line_gen)
+                    if line.startswith('```'):
+                        body_state = Tocsic.BodyState.BODY
+                    self.body += line
+                elif body_state == Tocsic.BodyState.FOUND_LINK:
+                    line = next(line_gen)
+                    if line.startswith('<a'):
+                        link_line = line
+                    elif line.startswith('#'):
+                        body_state = Tocsic.BodyState.BODY
+                        self.make_toc_entry(line, line_gen.line_num, link_line)
+                        self.body += '<a id="{}"></a>\n'.format(self.toc_info[-1][2])
+                    elif line.strip() != '':
+                        print('ERROR: There is something between <a> and a header')
+                    self.body += line
         except StopIteration:
             pass
+
+    @static_vars(to_underscore_regex=re.compile(r'[ -/]+'))
+    def header_to_link(self, header):
+        # TODO: generate correct link name if header contains characters that don't work in links
+        link = re.sub(self.header_to_link.to_underscore_regex, '_', header.lower()).strip('_')
+        link = ''.join(filter(lambda s: str.isalnum(s) or s == '_', link))
+
+        header_cnt = self.header_dict.get(link, 0)
+        if header_cnt == 0:
+            self.header_dict[link] = 1
+            return link
+        else:
+            self.header_dict[link] += 1
+            return link + '_' + str(header_cnt)
 
     def make_toc_entry(self, line, line_num, keyword_line=None):
         search_res = re.search(Tocsic.head_regex, line)
@@ -129,14 +177,15 @@ class Tocsic:
 
         header = search_res.groups()
         level = len(header[0]) - 1
-        # TODO: generate correct header name if header contains characters that don't work in links
         header_name = header[1]
-        link = header_name.lower().replace(' ', '-')
+        link = ''
 
         if keyword_line:
             search_res = re.search(Tocsic.keyword_regex, keyword_line)
             if search_res:
                 link = search_res.groups()[0]
+        else:
+            link = self.header_to_link(header_name)
 
         self.toc_info.append((level, header_name, link))
 
